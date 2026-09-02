@@ -1,0 +1,16 @@
+# 统一文本行的换行符，避免 Windows 作者与 macOS/Linux 协作者之间反复 CRLF/LF 差异。
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
+# 二进制文件：不做换行转换
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.csv text eol=lf

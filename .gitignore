@@ -1,0 +1,24 @@
+# ---- 密钥：绝不向 git 提交真实 key ----
+.env
+
+# ---- 任务书等 PDF 文档不进代码仓库 ----
+*.pdf
+
+# ---- 运行时生成的中间产物 ----
+work/
+.mpldir/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# ---- 各平台 IDE / 系统文件 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
