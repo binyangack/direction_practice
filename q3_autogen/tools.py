@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from . import config
+from .validation import validate_materials_csv
 
 # 项目工作目录：CSV、代码、图表、报告都放在这里。
 WORK_DIR = Path(__file__).resolve().parent / "work"
@@ -29,14 +30,28 @@ def write_materials_csv(csv_text: str, source: str | None = None) -> str:
 
     返回值
     ------
-    保存路径，用于让模型感知文件已生成。
+    一段校验反馈文本：校验通过时是简短确认；否则列出「问题/警告」，提示模型修正后重写。
     """
     path = WORK_DIR / "materials.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(csv_text.strip() + "\n", encoding="utf-8")
     if source:
         (WORK_DIR / "data_source.md").write_text(source.strip() + "\n", encoding="utf-8")
-    return f"数据表已保存到 {path}"
+
+    # 机制化校验：落盘后立即校验，把问题反馈给模型，让它（在有多次工具调用机会时）自行修正。
+    report = validate_materials_csv(csv_text, source)
+    if report["ok"] and not report["warnings"]:
+        return f"数据表已保存到 {path}，校验通过（{report['rows']} 行数据、{report['numeric_cols']} 个数值列）。"
+    lines = [f"数据表已保存到 {path}，但校验结果如下："]
+    if report["problems"]:
+        lines.append("【问题】")
+        lines += [f"  - {p}" for p in report["problems"]]
+    if report["warnings"]:
+        lines.append("【警告】")
+        lines += [f"  - {w}" for w in report["warnings"]]
+    if report["problems"]:
+        lines.append("请修正上述问题后，重新调用 write_materials_csv 覆盖保存。")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

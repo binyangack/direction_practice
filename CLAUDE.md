@@ -23,13 +23,14 @@ The whole codebase is one Python package: `q3_autogen/`. There is no test suite,
 
 - No `--task` → interactive REPL (`repl()`), loop of prompts until `exit`/`quit`/`q`/`退出`.
 - `--task "<...>"` → run that one task, then enter the REPL.
+- `--hitl` → HITL (human-in-the-loop) mode: `run_task_hitl()` drives each agent via `agent.run()` (NOT the group chat) as a **state machine** (plan → data → chart → analyze) with `input()` pauses after plan/data/chart. Non-empty feedback is **classified by an LLM** (`_classify_feedback`, one extra model call per feedback) into plan / scope / value / chart — scope (增删材料/属性) routes **back to plan** so the report's plan stays consistent with the data, value (改数值) routes to data only — then a back-jump re-runs that stage and all downstream stages, re-confirming each. Default is the fully-automatic `run_task()`. The REPL also carries the `--hitl` flag.
 - Each task starts with `clear_work_artifacts()` (deletes `materials.csv`, `analysis.py`, `comparison.png`, `report.md`, `data_source.md`) so stale files from the previous task don't leak in.
 
 ## Verify without burning tokens
 
 There is no test suite. The cheap checks:
 ```bash
-D:/conda/envs/pytorch/python.exe -m py_compile q3_autogen/main.py q3_autogen/agents.py q3_autogen/tools.py q3_autogen/config.py
+D:/conda/envs/pytorch/python.exe -m py_compile q3_autogen/main.py q3_autogen/agents.py q3_autogen/tools.py q3_autogen/config.py q3_autogen/validation.py q3_autogen/metrics.py
 ```
 Plus a structural-only `build_agents()` (constructs all 5 agents + tools, no API call). Do this for any change to `agents.py`/`tools.py` before triggering a real run.
 
@@ -42,8 +43,10 @@ Five agents, one `RoundRobinGroupChat` (fixed order, deterministic): **Planner �
 File roles:
 - `config.py` — DeepSeek client (`OpenAIChatCompletionClient`), **registering a `deepseek` message-transformer family** (DeepSeek isn't in the built-in families; without it you get `Unknown message type`). Also sets env vars for the Executor subprocess: `MPLCONFIGDIR` (project `.mpldir/` → Chinese matplotlib font) and `PYTHONIOENCODING=utf-8`. API keys are **not** hardcoded — a tiny `.env` loader reads `DEEPSEEK_API_KEY` / `TAVILY_API_KEY` from real env vars (taken as authoritative) or the gitignored project-root `.env` (see `.env.example`). Missing `DEEPSEEK_API_KEY` → real calls fail auth; missing `TAVILY_API_KEY` → Research falls back to memory values.
 - `agents.py` — the five agents, their system prompts, and `build_agents()` (the only place agents are constructed). Executor is a non-LLM `CodeExecutorAgent` (`sources=["Coder"]`, `work_dir=WORK_DIR.parent`, i.e. the `q3_autogen/` dir so generated `work/...` paths resolve).
-- `tools.py` — the two Research tools: `write_materials_csv(csv_text, source=None)` (writes `work/materials.csv`, and `work/data_source.md` if `source` is given) and `search_web(query, max_results)` (Tavily).
-- `main.py` — entry point: `build_team()` (wraps agents + termination), `run_task()` (runs + prints transcript), `write_report()` (assembly), REPL, `clear_work_artifacts()`.
+- `tools.py` — the two Research tools: `write_materials_csv(csv_text, source=None)` (writes `work/materials.csv`, and `work/data_source.md` if `source` is given, then **validates the CSV and reports problems/warnings back to the model**) and `search_web(query, max_results)` (Tavily).
+- `validation.py` — deterministic, domain-free CSV validator `validate_materials_csv()` (structural + statistical checks). Called inside `write_materials_csv` (feedback loop to Research, which self-corrects via its `max_tool_iterations=5`) and inside `write_report` (machine-computed 「数据质量校验」 line). No API, no domain hardcoding.
+- `metrics.py` — deterministic quantitative analysis `analyze_materials()` + `render_quant()`. Detects data shape (comparison vs series), fits linear/power/exponential models (picks best R²) for series, relative-% ranking for comparison. Uses only numpy (already a pandas/matplotlib dep). Rendered as the report's 「五、定量分析（机器计算）」 section — the machine "ground truth" beside the LLM's interpretation.
+- `main.py` — entry point: `build_team()` (wraps agents + termination), `run_task()` (auto mode, with `_run_team_with_progress` streaming progress), `run_task_hitl()` (HITL state machine `_classify_feedback`/`_clamp_target`/`_next_stage`), `write_report()` (assembly), `repl()`/`async_main()`, `clear_work_artifacts()`.
 
 ### Tool-calling loop — the trap that broke the pipeline
 `AssistantAgent`'s **`max_tool_iterations` defaults to `1`** (`_assistant_agent.py:739`). With a tool agent that must *search then write* (Research: `search_web` → look at results → `write_materials_csv`), the happy path has 2+ model turns, so the default made Research run `search_web` once and then **stop without ever calling `write_materials_csv`** → missing `materials.csv` → Executor `FileNotFoundError`. **Research has `max_tool_iterations=5`.** Keep that — any new tool agent doing multi-step tool use needs it raised above 1.
@@ -54,17 +57,18 @@ Research reaches the web via the **Tavily** search API (server-side, returns cle
 The system is expected to **state where the data came from**: `RESEARCH_SYSTEM` requires Research to pass a `source` to `write_materials_csv` — "联网检索（Tavily）+ URLs" when search worked, or "⚠️ 检索失败，本表数据为【模拟值/估算值】" when it fell back to memory. That text lands in `work/data_source.md` and is rendered in the report's section 三 as a blockquote. Preserve this honesty contract. If search fails it's fine — but the output must say the values are simulated, not pretend they're measured.
 
 ### Report assembly
-`write_report` builds `work/report.md` from the transcript: it splits on `]`, keeps **only `TextMessage`** (drops `ThoughtEvent` and all tool request/execution events so model "thinking" never appears), strips the `[Type][Source]` prefix, and groups by agent (Planner + Analyst only). CSV/code are read **directly from `work/` files**, not from the transcript. `TERMINATE` is stripped from the Analyst's text. Rendering `data_source.md` as a blockquote sits above the CSV in section 三.
+`write_report` builds `work/report.md` from the transcript: it splits on `]`, keeps **only `TextMessage`** (drops `ThoughtEvent` and all tool request/execution events so model "thinking" never appears), strips the `[Type][Source]` prefix, and groups by agent (Planner + Analyst only). CSV/code are read **directly from `work/` files**, not from the transcript. `TERMINATE` is stripped from the Analyst's text. Rendering `data_source.md` as a blockquote sits above the CSV in section 三. Below the CSV, a **machine-computed** 「数据质量校验」 line (from `validate_materials_csv`) reports ✓/⚠️ — data quality is now partly *enforced*, not just model-claimed. Section 五 is a machine-computed 「定量分析」 (from `metrics.py`); sections 六 (可视化) and 七 (结论) follow.
 
 ## Conventions to respect in generated code (Coder system prompt)
 
 - Reads `work/materials.csv` defensively: material column = `df.columns[0]`, numeric columns via `is_numeric_dtype`, **never hardcodes column names** (they vary per research goal, can be Chinese or English with `属性_单位` naming).
 - Uses `matplotlib.use("Agg")` + a `font.sans-serif` fallback list, no interactive window, saves `work/comparison.png`.
 - One subplot per numeric column in a grid.
+- Does **not** fit series data: Coder only prints rankings (comparison) / trends + extrema (series) for the Analyst's qualitative read. Fitting is **exclusively** `metrics.py` (linear/power/exponential, best R²), which deterministically computes the report's machine-computed section.
 - The Coder system prompt already encodes these; editing `agents.py` system messages changes agent behavior — that's the main knob for the project.
 
 ## Don't be tripped up by
 
 - `builtins` note: importing the package triggers `config.py`, which imports `autogen_ext.models.openai` and registers the DeepSeek transformer — heavy but required; ~seconds per import.
-- API keys are plaintext in `config.py` (teaching demo). Real runs bill the user's DeepSeek account and Tavily credits.
+- API keys live in the gitignored project-root `.env` (loaded by `config.py`), **not** in source. Real runs bill the user's DeepSeek account and Tavily credits.
 - Output randomness: LLM sampling means values/wording vary run to run; the pipeline structure is stable, values are not.

@@ -74,6 +74,8 @@ direction_practice/            # 仓库根（运行须在此目录用 -m 执行�
     ├── config.py              # LLM 客户端 + DeepSeek 转换注册 + .env 加载 + 中文字体/警告
     ├── agents.py              # 5 个智能体的定义与 system message（角色提示词）
     ├── tools.py               # 供 Agent 调用的工具（Tavily 检索、写 CSV）
+    ├── validation.py          # 数据校验器：落盘后校验 + 报告里机器计算的数据质量行
+    ├── metrics.py             # 定量分析器：拟合方程+R²+趋势/相对差异 → 报告「五、定量分析」
     ├── main.py                # 入口：编排团队、运行、生成报告、REPL
     ├── .mpldir/               # 项目级 matplotlib 配置（中文字体）
     └── work/                  # 运行产物：csv / md / py / png / report.md（已被忽略）
@@ -116,6 +118,9 @@ python -m q3_autogen.main
 # 先跑指定任务，再进入交互模式
 python -m q3_autogen.main --task "比较钢、铝、铜的导热性能，并画出对比柱状图"
 python -m q3_autogen.main --task "收集纯铜在不同温度下的导热系数并绘制随温度变化的曲线"
+
+# HITL 模式（人在回路）：在 方案 / 数据 / 图表 三处暂停征询你的意见
+python -m q3_autogen.main --task "..." --hitl
 ```
 
 > **Windows 台注意：** 控制台默认 GBK，管道会打印中文，请加 `PYTHONIOENCODING=utf-8`（否则可能 `UnicodeEncodeError`）：
@@ -128,9 +133,12 @@ python -m q3_autogen.main --task "收集纯铜在不同温度下的导热系数�
 - **联网检索 + 来源诚实**：Research 用 `search_web`（Tavily，服务端检索返回干净 JSON）拉真实数据；`write_materials_csv` 的 `source` 参数把来源写进 `work/data_source.md` —— 检索成功注 URL，失败写明“⚠️ 模拟值/估算值，未联网验证”。报告「三、材料数据」以 blockquote 呈现该说明，不做无来源的冒充实测。
 - **`max_tool_iterations=5`**：AutoGen `AssistantAgent` 默认 `max_tool_iterations=1`，只够“执行一轮工具”即结束，会导致 Research 搜完就停、不写 CSV。放宽到 5 才能走 “search → 读结果 → write_csv → 总结” 的多步工具链。
 - **防御式代码生成**：Coder 不写死列名——`group_col=df.columns[0]`，数值列用 `is_numeric_dtype` 判定，空则报错；并对中英文列名、任意列数稳健。
-- **自适应图型**：Coder 先探查数据形态——第一列有重复值（同一对象多行）或存在自变量列（temperature/时间/压力/step 等）→ 序列数据 → **折线图**（x=自变量、y=各数值属性，多对象各画一条线）；否则 → 对比数据 → **柱状图**。
+- **自适应图型**：Coder 先探查数据形态——**只看第一列（group_col）是否有重复取值**：有重复值（同一对象多行，如“纯铜”在多行温度下重复出现）→ 序列数据 → **折线图**（x=自变量、y=各数值属性，多对象各画一条线）；取值互不相同、每个对象仅一行 → 对比数据 → **柱状图**。注意：不要因某数值列名含“温度/时间”就误判为序列（如“热变形温度”是一列属性值、不是自变量，应画柱状图）。
 - **文件化数据交接**：Research 落盘 `materials.csv`，Coder 读取、Executor 在工作目录执行——避免跨 Agent 传文本的脆弱性；每任务开始先清掉上一次的中间产物。
 - **可靠执行**：顺序固定；Executor 只执行 `sources=["Coder"]` 的代码块；中文字体由项目内 `.mpldir/matplotlibrc` 保证；Analyst 以 `TERMINATE` 收尾，配合兜底 `MaxMessageTermination` 避免死循环。
+- **机制化数据校验**：数据可信度不再是"一句提示词劝告"，而是确定性代码——`write_materials_csv` 落盘后立即用 `validation.py` 校验（列数/空单元格/无数值列/未标注来源 → 问题；负值/极端离群 → 警告）并把结果反馈给 Research 自行修正；`write_report` 再对最终 CSV 复核，输出一行机器计算的「数据质量校验 ✓/⚠️」。
+- **定量分析（机制化）**：报告「五、定量分析」由 `metrics.py` 确定性计算——序列数据拟合 线性/幂律/指数 并按 R² 选优（方程 + R² + 趋势 + 极值），对比数据给相对最大值百分比。Coder **不再做拟合**（只 print 排序/趋势供 Analyst 定性解读），Analyst 也**不引用 R²**；机器数为 agent 解读的“地面真相”。
+- **HITL 模式（`--hitl`）**：把流水线建模为 **plan→data→chart→analyze 状态机**（`agent.run()` 逐段驱动 + `input()` 三处暂停）。用户反馈经 **LLM 分类**为 plan / scope / value / chart 四类：**scope（增删材料/属性）回跳到方案**重规划、连带数据重检索（保证报告的方案与最终数据一致）；value（改数值）只重做数据；chart 只重画。人是校验器之上的终极 ground truth。
 
 ## 七、已知限制
 
